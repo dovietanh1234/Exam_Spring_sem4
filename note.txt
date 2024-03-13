@@ -1,0 +1,164 @@
+Bài 1: Phân quyền Spring security 6
+Liên quan đến việc lặp request đầu vào -> nó sẽ filter anh ý la admin or user bthg
+
+
+1.  Mô hình HTTP đi qua các middleware trên spring:
+
+Frontend -->  One per request filter ( doFilterInternal() ) ---> WebSecurityConfig( securityFilterChain 'HttpSecurity http' )  --> controller
+
+
+* One per request filter ( doFilterInternal() ) => đây được gọi là phần lọc filter check xem anh đã có token key chưa
+
+* WebSecurityConfig( securityFilterChain 'HttpSecurity http' ) => Để kiểm tra về security check roles
+
+1.1 Luồng hoạt động:
+LUỒNG 1 CLIENT -> FILTER:
+Khi có một request từ [client] gửi đến cho [request-filter] thì nó sẽ đi qua một hàm kiểm tra filter "ko có request ngoại lệ"
+hàm kiểm tra sẽ là "doFilterInternal()"
+
+doFilterInternal() Nó sẽ thực thi môt cái method từ cái abstract class OnePerRequestFilter
+
+
+* mỗi request gửi đền thì đều phải có filter( nó như kiểu là bảo vệ của một toà nhà ai vào cx bị hỏi ).
+
+nó sẽ có 2 loại request...
+                       _ Có kiểm tra token.
+                       _ Không kiểm tra token. (login, register ... nó ko check jwt )
+ex:
+đi vào một ví dụ về FILTER:
+một file filter cụ thể:
+
+public class JwtTokenFilter extends OncePerRequestFilter{
+    @Value("${api.prefix}")
+    private String apiPrefix;
+    private final UserDetailService userDetailsService;
+    private final JwtTokenUtils jwtTokenUtil;
+
+    @Override
+    protected void doFilterInternal( @NonNull HttpServletRequest request,
+                                     @NotNull HttpServletResponse response,
+                                     @NotNull FilterChain filterChain
+                                    )
+        throws ServletException, IOException{
+                try{
+                    if(isBypassToken(request)){ // đoạn này "isBypassToken" đã cấu hình các URL ko cần phải check gì cả chỉ nếu rơi vào 1 trong các URL cấu hình trong này thì auto next sang bước tiếp theo
+// isBypassToken() -> Đoạn này dành cho các request ko cần check token sẽ đi vào đây và next step ...
+                        filterChain.doFilter( request, response );
+                        return;
+                    }
+// Nếu HTTP nào cần token sẽ chạy xuống đây:
+                    final String authHeader = request.getHeader("Authorization");
+// lấy token check xem nó có trong header ko?
+                    if( authHeader == null || !authHeader.startsWith("Bearer ") ){
+                        response.sendError( HttpServletResponse.SC_AUTHORIZED, "UnAuthorized" );
+                        return;
+                    }
+                    final String token = authHeader.subString(7); //cắt bearer và lấy token
+
+
+// Trong token sẽ có claims: các thông tin định danh của đối tuong -> lấy các thông tin định danh của đối tượng ra:
+                    final String phoneNumber = jwtTokenUtil.extractPhoneNumber(token); // lấy phoneNumber của đối tượng
+
+                    if( phoneNumber != null && SecurityContextHolder.getContext().getAuthentication() != null ){
+                    // Authentication là một đối tượng của SecurityContextHolder -> nó lưu các informs của clients cho phép spring security lấy để làm việc
+
+                        User userDetail = (User) userDetailsService.loadUserByUsername(phoneNumber); // lấy data & ép kiểu về entity User
+// Đối tượng "userDetail" -> của JAVA SPRING Nó sẽ có các thuộc tính để phục vụ cho java spring
+// quan trọng nhất là Authority để biết nó là quyền gì.
+                        if(jwtTokenUtil.validateToken(token, userDetails)){ // token này còn VALID nữa ko?
+
+                            UsernamePasswordAuthenticationToken authenticationToken =
+                            new UsernamePasswordAuthenticationToken(
+                            userDetail,
+                            null,
+                            userDetail.getAuthorities() ) // .getAuthorities() -> để biết nó là quyền gì? lay role
+
+                        // DA ĐI QUA FILTER ĐẾN WebSecurityConfig( SecurityFilterChain )
+
+                        // WebSecurityConfig check
+                        authenticationToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                        SecurityContextHolder.getContext().setAuthentication(authenticationToken); // tao Authentication cho spring security context
+
+                        }
+
+                    }
+                    ...
+
+                }catch(Exception ex){
+                    return RuntimeException( ex.getMessage() );
+                }
+            ...
+        }
+}
+
+-> Đây là một filter cụ thể đưa vào các cấu hinh của các "SecurityFilterChain" trong file SecurityConfig
+để config các HTTP.
+
+REQUEST CẦN TOKEN:
+HTTP --->  FILTER  (cần token) ví dụ xem thông tin cá nhân
+
+
+
+
+
+LUỒNG 2 FILTER -> WebSecurityConfig:
+REQUEST KO CÓ TOKEN:
+   Nếu filter check mà request ko cần token thì ở bên WebSecurityConfig sẽ permitAll() tất
+cả các request mà ko cần token có thể truy cập thằng vào controller để thực hành lấy dữ liệu
+và xử lý logic.
+   Vậy cái permitAll() nó sẽ nằm ở chỗ nào?
+-> Nó sẽ nằm ở file "SecurityConfig" @Configuration
+trong này ta sẽ khởi tạo một đối tượng hay còn gọi là @Bean
+ex:
+@Bean
+public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception{
+    http
+        .addFilterBefore( jwtTokenFilter, UsernamePasswordAuthenticationFilter.class ) // thêm một jwtTokenFilter ( xử lý token JWT trong yêu cầu HTTP )
+        .authorizeHttpRequests(request -> {
+            request
+                .requestMatchers(
+                    String.format("%s/users/register", apiPrefix),
+                    String.format("%s/users/login", apiPrefix)
+                ).permitAll()
+                .requestMatchers(GET,
+                    String.format("%s/roles**", apiPrefix)
+                ).permitAll()
+                .requestMatchers(DELETE,
+                     String.format("%s/products**", apiPrefix)
+                ).hasAnyRole(Role.ADMIN)
+                ...
+        })
+}
+
+Qua ví dụ trên với nhưng request ko cần jwt lần đâu vào thì ta cho permitAll() tất ko cần phải check gì cả.
+
+ .addFilterBefore() -> KHỐI 1: FILTER
+ .authorizeHttpRequests() -> KHỐI 2: SecurityConfig( SecurityFilterChain )
+
+REQUEST CÓ TOKEN:
+o khoi nay no se:
+ check method cua HTTP (GET, PUT, POST, DELETE) ?
+ check URL xem co dung ko?
+ check Role?
+ex:
+"
+.requestMatchers(DELETE, String.format("%s/products**", apiPrefix)
+                                ).hasAnyRole(Role.ADMIN)
+"
+
+
+
+
+
+
+
+2. Đi vao dự án:
+Đầu tien để bước vào một dự án ta cần biết ta cần install thư viện gì:
+
+framework:
+1. springboot-starter-security
+2. Jpa
+3. Mysql driver
+4. json Webtoken -> nó sẽ phục vụ cho khối [ One per request filter ( doFilterInternal() ) ]
+jsonwebtoken "jjwt-impl"  |  jsonwebtoken "jjwt-jackson"
+
